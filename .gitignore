@@ -1,0 +1,9 @@
+node_modules/
+dist-ui/
+*.log
+logs/
+*.db
+burned.db
+.DS_Store
+.env
+.env.local

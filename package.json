@@ -1,0 +1,37 @@
+{
+  "name": "burned-nodejs",
+  "version": "1.0.0",
+  "description": "Lightweight, self-contained VDS agent and web dashboard for Node.js and PM2",
+  "type": "module",
+  "scripts": {
+    "dev:ui": "vite",
+    "dev:agent": "tsx watch src/agent/index.ts",
+    "build:ui": "vite build",
+    "build:agent": "node build.agent.js",
+    "build": "npm run build:ui && npm run build:agent",
+    "start": "node dist/burned-agent.js"
+  },
+  "keywords": [
+    "pm2",
+    "vds",
+    "vps",
+    "dashboard",
+    "monitoring",
+    "vue",
+    "agent"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "esbuild": "^0.24.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vite-plugin-singlefile": "^2.1.0"
+  }
+}
