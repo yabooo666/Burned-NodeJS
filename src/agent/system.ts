@@ -1,9 +1,9 @@
 import os from 'node:os'
 import fs from 'node:fs'
-import { exec } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
-const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 
 let prevCpus = os.cpus()
 
@@ -101,7 +101,7 @@ function readLastLinesFromFile(filePath: string, maxLines = 100): string[] {
   try {
     if (!fs.existsSync(filePath)) return []
     const stat = fs.statSync(filePath)
-    if (stat.size === 0) return []
+    if (!stat.isFile() || stat.size === 0) return []
     const bytesToRead = Math.min(stat.size, 128 * 1024) // last 128KB
     const fd = fs.openSync(filePath, 'r')
     const buffer = Buffer.alloc(bytesToRead)
@@ -199,7 +199,7 @@ export async function getProcessLogs(
   severityFilter: 'all' | 'critical' = 'all'
 ): Promise<ProcessLogEntry[]> {
   try {
-    const { stdout } = await execAsync('pm2 jlist')
+    const { stdout } = await execFileAsync('pm2', ['jlist'], { timeout: 4000 })
     const list = JSON.parse(stdout)
     if (!Array.isArray(list) || list.length === 0) return []
 
@@ -235,8 +235,18 @@ export async function getProcessLogs(
 
     // If direct files were empty, fallback to pm2 logs CLI
     if (results.length === 0) {
-      const target = (appFilter && appFilter !== 'all') ? String(appFilter) : ''
-      const { stdout: cliLogs } = await execAsync(`pm2 logs ${target} --lines ${Math.min(maxLines, 50)} --nostream`)
+      const args = ['logs']
+      const linesCount = Math.max(1, Math.min(Number(maxLines) || 50, 500))
+      args.push('--lines', String(linesCount), '--nostream')
+
+      if (appFilter && appFilter !== 'all') {
+        const safeTarget = String(appFilter).replace(/[^a-zA-Z0-9_\-\.]/g, '')
+        if (safeTarget && !safeTarget.startsWith('-')) {
+          args.push('--', safeTarget)
+        }
+      }
+
+      const { stdout: cliLogs } = await execFileAsync('pm2', args, { timeout: 4000 })
       const rawLines = cliLogs.split('\n').filter((l: string) => l.trim().length > 0)
       for (const line of rawLines) {
         if (line.startsWith('[TAILING]') || (line.includes('last ') && line.includes('lines:'))) continue
@@ -258,7 +268,7 @@ export async function getProcessLogs(
 
 export async function getPm2List(): Promise<Pm2ProcessInfo[]> {
   try {
-    const { stdout } = await execAsync('pm2 jlist')
+    const { stdout } = await execFileAsync('pm2', ['jlist'], { timeout: 4000 })
     const list = JSON.parse(stdout)
     if (!Array.isArray(list)) return []
 
@@ -294,6 +304,53 @@ export async function getPm2List(): Promise<Pm2ProcessInfo[]> {
   } catch (err) {
     // PM2 might not be installed or not in PATH or daemon not running
     return []
+  }
+}
+
+/**
+ * Bulletproof PM2 Action Execution:
+ * 1. Uses `execFile` directly without shell spawning (zero bash interpolation).
+ * 2. Enforces a strict action whitelist.
+ * 3. Resolves and verifies targets against current PM2 process list.
+ * 4. Passes strictly validated numeric pm_id to prevent any argument/command injection.
+ */
+export async function executePm2Command(
+  action: string,
+  id?: number | string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (action === 'restartAll') {
+      await execFileAsync('pm2', ['restart', 'all'], { timeout: 10000 })
+      return { success: true }
+    }
+    if (action === 'reloadAll') {
+      await execFileAsync('pm2', ['reload', 'all'], { timeout: 10000 })
+      return { success: true }
+    }
+
+    const validActions = ['start', 'restart', 'stop', 'reload']
+    if (!validActions.includes(action)) {
+      return { success: false, error: `Invalid PM2 action: ${action}` }
+    }
+
+    if (id === undefined || id === null) {
+      return { success: false, error: 'Process ID is required' }
+    }
+
+    // Resolve target against current PM2 process list to verify existence
+    const list = await getPm2List()
+    const target = list.find(p => p.pm_id === Number(id) || p.name === String(id))
+
+    if (!target) {
+      return { success: false, error: `Process '${id}' not found in PM2` }
+    }
+
+    // Pass strictly validated numeric pm_id to execFile (no shell)
+    const safePmId = String(target.pm_id)
+    await execFileAsync('pm2', [action, safePmId], { timeout: 10000 })
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message || 'PM2 command execution failed' }
   }
 }
 

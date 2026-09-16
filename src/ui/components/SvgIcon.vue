@@ -71,6 +71,11 @@
       <rect width="14" height="14" x="5" y="5" rx="2"/>
     </g>
 
+    <!-- Play / Start -->
+    <g v-else-if="name === 'play'">
+      <polygon points="6 3 20 12 6 21 6 3"/>
+    </g>
+
     <!-- Reload / Lightning -->
     <g v-else-if="name === 'reload'">
       <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>

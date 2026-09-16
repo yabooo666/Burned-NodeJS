@@ -1,7 +1,7 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import { getSystemMetrics, getPm2List, getProcessLogs } from './system.js'
+import { getSystemMetrics, getPm2List, getProcessLogs, executePm2Command } from './system.js'
 import { EMBEDDED_HTML } from './embedded-ui.js'
 import {
   initDb,
@@ -40,8 +40,24 @@ try {
 const PORT = parseInt(process.env.PORT || '27109', 10)
 const HOST = process.env.HOST || '127.0.0.1'
 
+interface RateLimitEntry {
+  count: number
+  inFlight: number
+  lockedUntil: number
+}
+
 // In-memory rate limiter (resets on service restart)
-const rateLimiter = new Map<string, { count: number; lockedUntil: number }>()
+const rateLimiter = new Map<string, RateLimitEntry>()
+
+// Periodic pruning every 10 minutes to prevent memory leaks
+setInterval(() => {
+  const now = Date.now()
+  for (const [ip, entry] of rateLimiter.entries()) {
+    if (entry.lockedUntil <= now && entry.inFlight === 0) {
+      rateLimiter.delete(ip)
+    }
+  }
+}, 10 * 60 * 1000).unref()
 
 // Initialize SQLite database & first-run checks
 initDb()
@@ -49,7 +65,7 @@ initDb()
 // Active SSE client connections
 const sseClients = new Set<http.ServerResponse>()
 
-function getSessionToken(req: http.IncomingMessage): string {
+function getSessionToken(req: http.IncomingMessage, allowQuery = false): string {
   const authHeader = req.headers['authorization']
   if (authHeader && authHeader.startsWith('Bearer ')) {
     return authHeader.slice(7).trim()
@@ -58,16 +74,19 @@ function getSessionToken(req: http.IncomingMessage): string {
   if (typeof customHeader === 'string' && customHeader) {
     return customHeader.trim()
   }
-  try {
-    const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`)
-    const queryToken = url.searchParams.get('token')
-    if (queryToken) return queryToken.trim()
-  } catch { }
+  // Only accept ?token= if explicitly permitted (e.g. SSE EventSource)
+  if (allowQuery) {
+    try {
+      const url = new URL(req.url || '', `http://${req.headers.host || '127.0.0.1'}`)
+      const queryToken = url.searchParams.get('token')
+      if (queryToken) return queryToken.trim()
+    } catch { }
+  }
   return ''
 }
 
-function isAuthenticated(req: http.IncomingMessage): boolean {
-  const token = getSessionToken(req)
+function isAuthenticated(req: http.IncomingMessage, allowQuery = false): boolean {
+  const token = getSessionToken(req, allowQuery)
   return validateSession(token)
 }
 
@@ -114,103 +133,131 @@ function readJsonBody(req: http.IncomingMessage): Promise<any> {
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
-  const pathname = url.pathname
-
-
-
-  // Healthcheck endpoint (open)
-  if (pathname === '/health' || pathname === '/api/health') {
-    sendJson(res, 200, { status: 'healthy', uptime: process.uptime() })
-    return
-  }
-
-  // Auth Status Endpoint (open)
-  if (req.method === 'GET' && pathname === '/api/auth/status') {
-    sendJson(res, 200, {
-      initialized: isInitialized(),
-      authenticated: isAuthenticated(req)
-    })
-    return
-  }
-
-  // Verify Temporary Setup Key (open, for setup wizard)
-  if (req.method === 'POST' && pathname === '/api/auth/verify-temp-key') {
+  try {
+    let url: URL
     try {
-      const { tempKey } = await readJsonBody(req)
-      if (!tempKey) {
-        sendJson(res, 400, { valid: false, error: 'Missing temporary key' })
+      url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`)
+    } catch {
+      sendJson(res, 400, { error: 'Bad Request: Malformed URL' })
+      return
+    }
+    const pathname = url.pathname
+
+    // Healthcheck endpoint (open)
+    if (pathname === '/health' || pathname === '/api/health') {
+      sendJson(res, 200, { status: 'healthy', uptime: process.uptime() })
+      return
+    }
+
+    // Auth Status Endpoint (open)
+    if (req.method === 'GET' && pathname === '/api/auth/status') {
+      sendJson(res, 200, {
+        initialized: isInitialized(),
+        authenticated: isAuthenticated(req)
+      })
+      return
+    }
+
+    // Verify Temporary Setup Key (open, for setup wizard)
+    if (req.method === 'POST' && pathname === '/api/auth/verify-temp-key') {
+      try {
+        const { tempKey } = await readJsonBody(req)
+        if (!tempKey || typeof tempKey !== 'string') {
+          sendJson(res, 400, { valid: false, error: 'Missing or invalid temporary key' })
+          return
+        }
+        const valid = verifyTempKey(tempKey)
+        sendJson(res, valid ? 200 : 401, { valid })
+      } catch (err: any) {
+        sendJson(res, 400, { valid: false, error: err.message })
+      }
+      return
+    }
+
+    // Register Admin Password (open, only works with valid tempKey)
+    if (req.method === 'POST' && pathname === '/api/auth/setup-password') {
+      try {
+        const { tempKey, password } = await readJsonBody(req)
+        if (typeof tempKey !== 'string' || typeof password !== 'string') {
+          sendJson(res, 400, { success: false, error: 'Invalid parameter types' })
+          return
+        }
+        const result = registerAdminPassword(tempKey, password)
+        sendJson(res, result.success ? 200 : 400, result)
+      } catch (err: any) {
+        sendJson(res, 400, { success: false, error: err.message })
+      }
+      return
+    }
+
+    // Login with Password (rate-limited: 3 failures = 24h lockout, resets on restart)
+    if (req.method === 'POST' && pathname === '/api/auth/login') {
+      const clientIp = req.socket.remoteAddress || 'unknown'
+      let rl = rateLimiter.get(clientIp)
+      if (!rl) {
+        rl = { count: 0, inFlight: 0, lockedUntil: 0 }
+        rateLimiter.set(clientIp, rl)
+      }
+
+      if (rl.lockedUntil > Date.now()) {
+        const hoursLeft = Math.ceil((rl.lockedUntil - Date.now()) / (1000 * 60 * 60))
+        sendJson(res, 429, { success: false, error: `Too many failed attempts. Locked for ${hoursLeft}h. Restart the service to reset.` })
         return
       }
-      const valid = verifyTempKey(tempKey)
-      sendJson(res, valid ? 200 : 401, { valid })
-    } catch (err: any) {
-      sendJson(res, 400, { valid: false, error: err.message })
-    }
-    return
-  }
 
-  // Register Admin Password (open, only works with valid tempKey)
-  if (req.method === 'POST' && pathname === '/api/auth/setup-password') {
-    try {
-      const { tempKey, password } = await readJsonBody(req)
-      const result = registerAdminPassword(tempKey, password)
-      sendJson(res, result.success ? 200 : 400, result)
-    } catch (err: any) {
-      sendJson(res, 400, { success: false, error: err.message })
-    }
-    return
-  }
-
-  // Login with Password (rate-limited: 3 failures = 24h lockout, resets on restart)
-  if (req.method === 'POST' && pathname === '/api/auth/login') {
-    const clientIp = req.socket.remoteAddress || 'unknown'
-    const rl = rateLimiter.get(clientIp)
-    if (rl && rl.lockedUntil > Date.now()) {
-      const hoursLeft = Math.ceil((rl.lockedUntil - Date.now()) / (1000 * 60 * 60))
-      sendJson(res, 429, { success: false, error: `Too many failed attempts. Locked for ${hoursLeft}h. Restart the service to reset.` })
-      return
-    }
-    try {
-      const { password } = await readJsonBody(req)
-      const result = authenticateAdmin(password)
-      if (result.success) {
-        rateLimiter.delete(clientIp)
-        sendJson(res, 200, result)
-      } else {
-        const entry = rateLimiter.get(clientIp) || { count: 0, lockedUntil: 0 }
-        entry.count++
-        if (entry.count >= 3) {
-          entry.lockedUntil = Date.now() + (24 * 60 * 60 * 1000)
-        }
-        rateLimiter.set(clientIp, entry)
-        const remaining = 3 - entry.count
-        if (remaining > 0) {
-          sendJson(res, 401, { success: false, error: `Invalid password. ${remaining} attempt(s) remaining before 24h lockout.` })
-        } else {
-          sendJson(res, 429, { success: false, error: 'Too many failed attempts. Locked for 24h. Restart the service to reset.' })
-        }
+      if (rl.count + rl.inFlight >= 3) {
+        sendJson(res, 429, { success: false, error: 'Too many failed attempts. Locked for 24h. Restart the service to reset.' })
+        return
       }
-    } catch (err: any) {
-      sendJson(res, 400, { success: false, error: err.message })
-    }
-    return
-  }
 
-  // Logout (requires token)
-  if (req.method === 'POST' && pathname === '/api/auth/logout') {
-    const token = getSessionToken(req)
-    if (token) revokeSession(token)
-    sendJson(res, 200, { success: true })
-    return
-  }
+      // Synchronously increment in-flight count before async body parsing to prevent race condition
+      rl.inFlight++
 
-  // --- PROTECTED API ENDPOINTS (Require Session Token) ---
-  if (pathname.startsWith('/api/')) {
-    if (!isAuthenticated(req)) {
-      sendJson(res, 401, { error: 'Unauthorized: valid session token required' })
+      try {
+        const { password } = await readJsonBody(req)
+        if (typeof password !== 'string') {
+          sendJson(res, 400, { success: false, error: 'Invalid password format' })
+          return
+        }
+        const result = authenticateAdmin(password)
+        if (result.success) {
+          rateLimiter.delete(clientIp)
+          sendJson(res, 200, result)
+        } else {
+          rl.count++
+          if (rl.count >= 3) {
+            rl.lockedUntil = Date.now() + (24 * 60 * 60 * 1000)
+          }
+          const remaining = 3 - rl.count
+          if (remaining > 0) {
+            sendJson(res, 401, { success: false, error: `Invalid password. ${remaining} attempt(s) remaining before 24h lockout.` })
+          } else {
+            sendJson(res, 429, { success: false, error: 'Too many failed attempts. Locked for 24h. Restart the service to reset.' })
+          }
+        }
+      } catch (err: any) {
+        sendJson(res, 400, { success: false, error: err.message })
+      } finally {
+        rl.inFlight = Math.max(0, rl.inFlight - 1)
+      }
       return
     }
+
+    // Logout (requires token)
+    if (req.method === 'POST' && pathname === '/api/auth/logout') {
+      const token = getSessionToken(req)
+      if (token) revokeSession(token)
+      sendJson(res, 200, { success: true })
+      return
+    }
+
+    // --- PROTECTED API ENDPOINTS (Require Session Token) ---
+    if (pathname.startsWith('/api/')) {
+      const isSse = pathname === '/api/events'
+      if (!isAuthenticated(req, isSse)) {
+        sendJson(res, 401, { error: 'Unauthorized: valid session token required' })
+        return
+      }
 
     // API: System Metrics
     if (req.method === 'GET' && pathname === '/api/system') {
@@ -228,14 +275,29 @@ const server = http.createServer(async (req, res) => {
     // API: Live PM2 Process Logs
     if (req.method === 'GET' && pathname === '/api/pm2/logs') {
       const appFilter = url.searchParams.get('app') || 'all'
-      const lines = parseInt(url.searchParams.get('lines') || '100', 10)
+      const parsedLines = parseInt(url.searchParams.get('lines') || '100', 10)
+      const lines = Number.isFinite(parsedLines) ? Math.max(1, Math.min(parsedLines, 500)) : 100
       const severity = (url.searchParams.get('severity') as 'all' | 'critical') || 'all'
       const logs = await getProcessLogs(appFilter, lines, severity)
       sendJson(res, 200, logs)
       return
     }
 
-
+    // API: PM2 Actions (start, restart, stop, reload, restartAll, reloadAll)
+    if (req.method === 'POST' && pathname === '/api/pm2/action') {
+      try {
+        const { action, id } = await readJsonBody(req)
+        if (!action || typeof action !== 'string') {
+          sendJson(res, 400, { success: false, error: 'Missing or invalid action parameter' })
+          return
+        }
+        const result = await executePm2Command(action, id)
+        sendJson(res, result.success ? 200 : 400, result)
+      } catch (err: any) {
+        sendJson(res, 400, { success: false, error: err.message })
+      }
+      return
+    }
 
     // API: SSE Real-Time Stream (max 50 concurrent connections)
     if (req.method === 'GET' && pathname === '/api/events') {
@@ -274,22 +336,44 @@ const server = http.createServer(async (req, res) => {
   }
 
   sendJson(res, 404, { error: 'Not Found' })
+} catch (err: any) {
+  try {
+    sendJson(res, 500, { error: 'Internal Server Error' })
+  } catch {}
+}
 })
 
-// Real-time broadcast loop for authenticated SSE clients
+// Real-time broadcast loop for authenticated SSE clients with concurrency gate
+let isBroadcasting = false
 setInterval(async () => {
-  if (sseClients.size === 0) return
+  if (sseClients.size === 0 || isBroadcasting) return
+  isBroadcasting = true
   try {
     const system = getSystemMetrics()
     const pm2 = await getPm2List()
     const payload = `data: ${JSON.stringify({ system, pm2 })}\n\n`
-    for (const client of sseClients) {
-      client.write(payload)
+    for (const client of [...sseClients]) {
+      try {
+        client.write(payload)
+      } catch {
+        sseClients.delete(client)
+        try { client.end() } catch {}
+      }
     }
   } catch (e) {
     // broadcast error
+  } finally {
+    isBroadcasting = false
   }
 }, 1500)
+
+// Global process error handlers to prevent crash on unexpected errors
+process.on('unhandledRejection', (reason) => {
+  console.error('[Burned-Agent] Unhandled rejection:', reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[Burned-Agent] Uncaught exception:', err)
+})
 
 // Start Server
 server.listen(PORT, HOST, () => {

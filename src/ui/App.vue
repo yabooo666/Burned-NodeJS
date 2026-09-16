@@ -93,7 +93,7 @@
           :pm2List="pm2List"
           :loading="loading"
           @refresh="fetchData"
-
+          @action="executePm2Action"
           @view-logs="onViewLogs"
         />
         <LogsView
@@ -101,6 +101,7 @@
           :pm2List="pm2List"
           :initialApp="selectedLogApp"
           :token="token"
+          @action="executePm2Action"
         />
       </main>
 
@@ -246,7 +247,32 @@ async function fetchData() {
   }
 }
 
-
+async function executePm2Action(action: string, id?: number | string) {
+  if (!token.value) return
+  try {
+    addLog(`Executing PM2 action: ${action} on ${id ?? 'all'}`, 'User', 'info')
+    const res = await fetch('/api/pm2/action', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token.value}`
+      },
+      body: JSON.stringify({ action, id })
+    })
+    const data = await res.json()
+    if (data.success) {
+      showToast(`Success: ${action} executed`, 'success')
+      addLog(`PM2 ${action} finished successfully`, 'PM2', 'success')
+      await fetchData()
+    } else {
+      showToast(`Error: ${data.error || 'Failed'}`, 'error')
+      addLog(`PM2 ${action} failed: ${data.error}`, 'PM2', 'error')
+    }
+  } catch (err: any) {
+    showToast(`Network error: ${err.message}`, 'error')
+    addLog(`Network error: ${err.message}`, 'Agent', 'error')
+  }
+}
 
 function setupSSE() {
   if (typeof EventSource === 'undefined' || !token.value) return

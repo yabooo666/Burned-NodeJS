@@ -91,6 +91,10 @@ Every icon in Burned NodeJS is an inline SVG vector. Current icons in the regist
 - `shield` — Security, setup gate, authentication
 - `key` — Master key and session verification
 - `refresh` — Live reload & fetch triggers
+- `play` — Start stopped or offline PM2 process
+- `restart` — Restart running PM2 process
+- `stop` — Stop running PM2 process
+- `reload` — Reload PM2 process cluster
 - `copy` / `check` — Clipboard copy action with stateful confirmation
 - `trash` — Log buffer clear action
 - `lock` — Password fields and login screen

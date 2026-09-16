@@ -29,9 +29,9 @@
   - `node:fs` & `node:path` for direct log file streaming and `.env` loading.
   - `node:os` & `node:child_process` for metrics and PM2 querying.
 
-### 2.2 Monitoring-Only Policy (No Shell Execution)
-- **Never add endpoints or UI buttons that execute arbitrary shell commands** or restart/stop/delete PM2 processes.
-- The project is an operational dashboard, not a remote management console. Keeping it read-only guarantees safety on public IPs.
+### 2.2 Hardened Process Execution (No Shell Spawning)
+- **Never execute arbitrary shell commands** or use `child_process.exec()`.
+- All PM2 lifecycle commands (`start`, `restart`, `stop`, `reload`, `restartAll`, `reloadAll`) must execute strictly via `node:child_process.execFile` with an array of arguments, strict action whitelisting, and target IDs pre-verified against active PM2 process lists. Shell operators and unverified inputs remain strictly prohibited.
 
 ### 2.3 Single-File Deployment
 - The entire application (HTML, CSS, Vue runtime, SQLite auth, server logic) must compile into **one single script**: `dist/burned-agent.js`.

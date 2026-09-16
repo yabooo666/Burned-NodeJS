@@ -11,8 +11,7 @@
 - **Zero external runtime dependencies** (uses Node.js 18+ built-ins: `node:http`, `node:sqlite`, `node:crypto`, `node:fs`, `node:child_process`).
 - **Single-file deployment artifact**: The compiled Vue 3 Single-Page App (SPA) is embedded directly into the Node.js agent script, bundled by `esbuild` into one standalone file (`dist/burned-agent.js`, ~1.2 MB).
 - **Native SQLite Authentication**: Passwords hashed with `node:crypto` `scrypt`, verified with `timingSafeEqual`, active session tokens stored in local `burned.db`.
-- **First-Run Terminal Gate**: Generates a high-entropy 48-character temporary key displayed in an ASCII box in `pm2 logs` or terminal on first startup. The web UI cannot be configured without physical access to this key.
-- **Read-Only / Monitoring-Only Security**: All process management commands (restart, stop, delete) have been **strictly removed** to eliminate Remote Code Execution (RCE) vectors. The agent is strictly an observer/dashboard.
+- **Hardened Zero-Shell PM2 Controls**: Process management commands (`start`, `restart`, `stop`, `reload`) are executed strictly via `node:child_process.execFile` with **zero shell spawning**, strict action whitelisting, and target validation against verified numeric process IDs. Arbitrary command execution and shell interpolation remain strictly prohibited.
 - **OLED Black Monochrome Aesthetic**: `#000000` pitch black, high-contrast grays, sharp SVGs, **ABSOLUTELY ZERO EMOJIS** in the interface, and responsive Pterodactyl-inspired process switcher tabs.
 
 ---

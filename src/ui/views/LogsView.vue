@@ -45,7 +45,43 @@
         </div>
       </div>
 
-
+      <!-- Quick Control Actions right in Console -->
+      <div class="hero-actions">
+        <button
+          class="action-btn"
+          title="Restart Process"
+          @click="requestAction('restart', currentProcess.pm_id, currentProcess.name)"
+        >
+          <SvgIcon name="restart" size="13" />
+          <span>Restart</span>
+        </button>
+        <button
+          v-if="currentProcess.status === 'online'"
+          class="action-btn"
+          title="Stop Process"
+          @click="requestAction('stop', currentProcess.pm_id, currentProcess.name)"
+        >
+          <SvgIcon name="stop" size="13" />
+          <span>Stop</span>
+        </button>
+        <button
+          v-else
+          class="action-btn"
+          title="Start Process"
+          @click="requestAction('start', currentProcess.pm_id, currentProcess.name)"
+        >
+          <SvgIcon name="play" size="13" />
+          <span>Start</span>
+        </button>
+        <button
+          class="action-btn"
+          title="Reload Process (Zero Downtime)"
+          @click="requestAction('reload', currentProcess.pm_id, currentProcess.name)"
+        >
+          <SvgIcon name="reload" size="13" />
+          <span>Reload</span>
+        </button>
+      </div>
     </div>
 
     <!-- Terminal Header & Filter Toolbar -->
@@ -139,14 +175,23 @@
       </div>
     </div>
 
-
+    <!-- Action Confirmation Modal -->
+    <ConfirmModal
+      :isOpen="modalConfig.isOpen"
+      :title="modalConfig.title"
+      :message="modalConfig.message"
+      :warning="modalConfig.warning"
+      :confirmText="modalConfig.confirmText"
+      @confirm="onModalConfirm"
+      @cancel="modalConfig.isOpen = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import SvgIcon from '../components/SvgIcon.vue'
-
+import ConfirmModal from '../components/ConfirmModal.vue'
 
 export interface ProcessLogEntry {
   source: string
@@ -161,7 +206,9 @@ const props = defineProps<{
   token: string
 }>()
 
-
+const emit = defineEmits<{
+  (e: 'action', action: string, id?: number | string): void
+}>()
 
 const activeApp = ref(props.initialApp || 'all')
 const severityFilter = ref<'all' | 'critical'>('all')
@@ -172,6 +219,53 @@ const autoScroll = ref(true)
 const wordWrap = ref(true)
 const copied = ref(false)
 const terminalRef = ref<HTMLElement | null>(null)
+
+// Confirmation modal state
+const modalConfig = ref<{
+  isOpen: boolean
+  action: string
+  id?: number | string
+  title: string
+  message: string
+  warning?: string
+  confirmText?: string
+}>({
+  isOpen: false,
+  action: '',
+  title: '',
+  message: ''
+})
+
+function requestAction(action: string, id: number | string, appName: string) {
+  if (action === 'stop') {
+    modalConfig.value = {
+      isOpen: true,
+      action,
+      id,
+      title: `Stop Process: ${appName}`,
+      message: `Are you sure you want to stop process #${id} (${appName})?`,
+      warning: 'The service will be shut down and remain offline until started.',
+      confirmText: 'Stop Process'
+    }
+  } else if (action === 'restart') {
+    modalConfig.value = {
+      isOpen: true,
+      action,
+      id,
+      title: `Restart Process: ${appName}`,
+      message: `Are you sure you want to restart process #${id} (${appName})?`,
+      confirmText: 'Restart Process'
+    }
+  } else {
+    emit('action', action, id)
+  }
+}
+
+function onModalConfirm() {
+  const { action, id } = modalConfig.value
+  modalConfig.value.isOpen = false
+  emit('action', action, id)
+}
 
 function cleanText(raw: string): string {
   if (!raw) return ''

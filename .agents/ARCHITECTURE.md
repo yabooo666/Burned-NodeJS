@@ -50,23 +50,28 @@ The server uses Node.js's native `node:http`. It intentionally does NOT use Expr
    - `X-Frame-Options: DENY`
    - `Referrer-Policy: no-referrer`
    - `Permissions-Policy: camera=(), microphone=(), geolocation=()`
-2. **Payload Size Guard**:
-   Enforces a strict **5MB limit** (`5 * 1024 * 1024` bytes) on incoming request bodies to prevent memory-exhaustion DoS.
+2. **Payload Size Guard & URL Safety**:
+   - Enforces a strict **5MB limit** (`5 * 1024 * 1024` bytes) on incoming request bodies to prevent memory-exhaustion DoS.
+   - Top-level `try/catch` error boundary and safe URL parsing to prevent malformed URL crashes.
 3. **In-Memory Rate Limiter**:
    Failed authentication attempts are tracked per IP:
    - 3 failed attempts triggers an **immediate 24-hour lockout** (`24 * 60 * 60 * 1000` ms).
-   - Stored in an in-memory `Map<string, { count: number; lockedUntil: number }>`.
+   - Tracks concurrent requests synchronously with `inFlight` counter to eliminate race-condition burst bypasses.
+   - Expired entries are automatically pruned every 10 minutes to prevent memory leaks.
    - Cleared automatically when the service restarts.
 4. **Endpoint Routing Table**:
    - `GET /` — Serves `EMBEDDED_HTML` from memory.
    - `GET /api/status` — Returns `{ initialized: boolean, requiresSetup: boolean }`.
-   - `POST /api/auth/setup` — Verifies 48-character master key, registers admin password.
+   - `POST /api/auth/verify-temp-key` — Validates first-run setup key.
+   - `POST /api/auth/setup-password` — Sets admin password, initializes system.
    - `POST /api/auth/login` — Verifies admin password, issues 24-hour session token.
    - `POST /api/auth/logout` — Revokes session token.
    - `GET /api/system` — Authenticated: returns instantaneous system metrics.
    - `GET /api/pm2` — Authenticated: returns list of PM2 processes.
-   - `GET /api/pm2/logs` — Authenticated: returns parsed, ANSI-stripped log entries.
-   - `GET /api/events` — Authenticated: Server-Sent Events (SSE) telemetry stream.
+   - `POST /api/pm2/action` — Authenticated: executes bulletproof PM2 action (`start`, `restart`, `stop`, `reload`, `restartAll`, `reloadAll`).
+   - `GET /api/pm2/logs` — Authenticated: returns parsed, ANSI-stripped log entries (clamped to max 500 lines).
+   - `GET /api/events` — Authenticated: Server-Sent Events (SSE) telemetry stream (allows `?token=`).
+   *Note: All REST endpoints strictly require `Authorization: Bearer <token>`; query parameter tokens are forbidden on REST routes.*
 
 ### 2.2 Native SQLite Layer (`src/agent/db.ts`)
 Burned uses Node 18+'s native `node:sqlite` module (`DatabaseSync`).
@@ -112,14 +117,19 @@ CREATE TABLE IF NOT EXISTS sessions (
   - Executes `pm2 jlist` via child process with a 4-second timeout.
   - Parses JSON output into typed `Pm2ProcessInfo` structs (CPU %, memory bytes, status, uptime, restarts, log file paths).
 - **Log Collection & ANSI Sanitization**:
-  - Directly reads the last 128KB of `pm_out_log_path` and `pm_err_log_path` using native `node:fs` file descriptors for instantaneous response without spawning child processes.
-  - Falls back to `pm2 logs <name> --lines N --nostream` only if direct log paths do not exist.
+  - Directly reads the last 128KB of `pm_out_log_path` and `pm_err_log_path` using native `node:fs` file descriptors for instantaneous response without spawning child processes. Enforces `stat.isFile()` to avoid non-regular files.
+  - Falls back to `pm2 logs <name> --lines N --nostream` only if direct log paths do not exist. Sanitizes target arguments with `--` separator to eliminate CLI flag injection.
   - **ANSI Sanitizer (`cleanAnsiAndControl`)**:
     Strips raw terminal codes (`\x1b[32m`, `\x1b[39m`, `\x1b[38;5;3m`, `\x1b[0m`), orphan bracket codes (`[32m`), and control bytes (`\x00` - `\x1F`).
   - **Smart Timestamp Extractor (`extractTime`)**:
     Automatically extracts NestJS timestamps (`09/15/2026, 6:09:21 PM` -> `6:09:21 PM`), standard ISO 8601 timestamps (`2026-09-16T04:58:33` -> `04:58:33`), and PM2 timestamps into clean table columns.
   - **Critical Crash Classifier**:
     Automatically flags lines containing `FATAL`, `EXCEPTION`, `UNHANDLED`, `SIGSEGV`, `SIGABRT`, `SYNTAXERROR`, `TYPEERROR`, `EADDRINUSE`, `MODULE_NOT_FOUND`, or `EXITED WITH CODE` as `critical` severity.
+- **Bulletproof PM2 Action Execution (`executePm2Command`)**:
+  - Executed via `node:child_process.execFile` (zero shell spawning via `/bin/sh`).
+  - Strict action whitelist: `'start'`, `'restart'`, `'stop'`, `'reload'`, `'restartAll'`, `'reloadAll'`.
+  - Targets are pre-verified against `getPm2List()`. Only validated numeric `pm_id` strings (e.g. `'0'`) are passed to the binary.
+  - Hard 10-second timeout on all executions.
 
 ---
 
@@ -129,6 +139,8 @@ Instead of high-frequency polling from the client, the server pushes updates via
 - Endpoint: `GET /api/events`
 - SSE client pool: `sseClients = new Set<http.ServerResponse>()` (hard capped at 50 connections to prevent resource exhaustion).
 - Broadcast Interval: Every 1,500ms (`setInterval`).
+- **Concurrency Gate (`isBroadcasting`)**: Ensures previous `pm2 jlist` subprocess finishes before spawning another, preventing process piling under heavy server load.
+- **Per-Client Error Handling**: Stale or disconnected sockets are caught and deleted immediately from the client pool.
 - Payload:
   ```json
   {

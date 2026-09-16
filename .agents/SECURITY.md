@@ -8,13 +8,14 @@ Burned NodeJS is designed to be deployed directly on public-facing Virtual Dedic
 
 ## 2. Hardened Security Measures
 
-### 2.1 Read-Only Policy (Total RCE Elimination)
-- **Historical Vulnerability Fixed**: Earlier iterations exposed a PM2 action route (`POST /api/pm2/action`) that executed shell commands like `pm2 restart <id>` or `pm2 reload <id>`. Even with sanitization, command injection in process arguments represented an intolerable Remote Code Execution (RCE) vector.
-- **Current Architecture**: All remote execution functionality has been **completely excised**.
-  - `executePm2Command()` has been deleted.
-  - `/api/pm2/action` endpoint has been deleted.
-  - Action buttons (restart, stop, reload, delete) have been removed from the UI.
-  - **The agent is strictly an observer/dashboard.** It CANNOT alter server state, write arbitrary files, or execute CLI commands on request.
+### 2.1 Bulletproof PM2 Process Management (Zero-Shell, Strict Verification)
+- **Historical Vulnerability Addressed**: Earlier iterations executed unsanitized shell commands via `child_process.exec()` (`pm2 ${action} ${id}`), which spawned `/bin/sh` and was vulnerable to command injection if malicious payloads were supplied in `id`.
+- **Hardened Bulletproof Architecture**:
+  - **Zero-Shell Invocations**: All PM2 commands are executed via `node:child_process.execFile()`, which invokes the binary directly via kernel `execve` without spawning `/bin/sh` or `/bin/bash`. Shell operators (`;`, `&&`, `|`, `` ` ``, `$()`) have zero special meaning and cannot execute secondary commands.
+  - **Strict Action Whitelist**: Only explicit, predefined actions are permitted: `'start'`, `'restart'`, `'stop'`, `'reload'`, `'restartAll'`, `'reloadAll'`.
+  - **Process Verification & ID Coercion**: For single-process operations, `getPm2List()` is queried first. The requested process must match an active/registered PM2 item. The argument passed to `execFile` is strictly the verified integer `pm_id` (`String(target.pm_id)`), preventing any flag injection or parameter tampering.
+  - **Authenticated & Rate-Limited**: The endpoint `POST /api/pm2/action` requires a valid cryptographic session token.
+  - **Execution Timeouts**: All calls have a strict 10-second timeout to prevent process hangs.
 
 ### 2.2 In-Memory Brute-Force Rate Limiting
 - **Rule**: Any client IP that accumulates **3 failed login attempts** is immediately locked out for **24 hours** (`24 * 60 * 60 * 1000` ms).
