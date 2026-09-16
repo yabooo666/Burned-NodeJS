@@ -114,6 +114,36 @@ function readLastLinesFromFile(filePath: string, maxLines = 100): string[] {
   }
 }
 
+/**
+ * Strips all ANSI escape sequences, color codes, and unprintable terminal artifacts.
+ */
+function cleanAnsiAndControl(raw: string): string {
+  if (!raw) return ''
+  return raw
+    // Standard ANSI escape sequences (\x1b[...] or \u001b[... or \u009b[...)
+    .replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
+    // Orphan ANSI color codes if ESC char was stripped: e.g. [32m, [39m, [38;5;3m, [0m
+    .replace(/\[(?:\d{1,3}(?:;\d{1,3})*)m/g, '')
+    // Stray ESC or bracketed codes
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+    // Non-printable control characters except newline & tab
+    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '')
+}
+
+/**
+ * Extracts a clean time string (e.g. "18:09:21" or "6:09:21 PM").
+ */
+function extractTime(raw: string): string {
+  if (!raw) return ''
+  const timeWithAmPm = raw.match(/(\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)?)/i)
+  if (timeWithAmPm) return timeWithAmPm[1].trim()
+
+  const timeIso = raw.match(/(\d{2}:\d{2}:\d{2})/i)
+  if (timeIso) return timeIso[1].trim()
+
+  return raw.trim()
+}
+
 export interface ProcessLogEntry {
   source: string
   text: string
@@ -122,22 +152,41 @@ export interface ProcessLogEntry {
 }
 
 function parseLogLine(rawLine: string, source: string, defaultLevel: 'info' | 'error'): ProcessLogEntry {
-  let text = rawLine.trim()
+  let text = cleanAnsiAndControl(rawLine).trim()
   let timestamp = ''
   let level: 'info' | 'error' | 'critical' = defaultLevel
 
-  // Try extracting timestamp like "2026-09-16T04:58:33:" or "[2026-09-16 04:58:33]"
-  const isoMatch = text.match(/^\[?(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)\]?:?\s*/)
+  // 1. PM2 / ISO timestamp at beginning: "2026-09-16T04:58:33:" or "[2026-09-16 04:58:33]"
+  const isoMatch = text.match(/^\[?(\d{4}[-/]\d{2}[-/]\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)\]?:?\s*/)
   if (isoMatch) {
-    timestamp = isoMatch[1]
-    text = text.slice(isoMatch[0].length)
+    timestamp = extractTime(isoMatch[1])
+    text = text.slice(isoMatch[0].length).trim()
+  }
+
+  // 2. NestJS timestamp format: "[Nest] 644441  - 09/15/2026, 6:09:21 PM     LOG [RouterExplorer] ..."
+  if (!timestamp) {
+    const nestMatch = text.match(/^(\[Nest\]\s*(?:\d+\s*-\s*)?)(\d{1,2}\/\d{1,2}\/\d{4},\s*\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)?)\s+(.*)$/i)
+    if (nestMatch) {
+      timestamp = extractTime(nestMatch[2])
+      const prefix = nestMatch[1] ? nestMatch[1].trim() + ' ' : ''
+      text = `${prefix}${nestMatch[3]}`.trim()
+    }
+  }
+
+  // 3. Bracketed or standalone time at beginning: "[18:09:21]" or "18:09:21 "
+  if (!timestamp) {
+    const timeMatch = text.match(/^\[?(\d{2}:\d{2}:\d{2}(?:\s*(?:AM|PM))?)\]?:?\s*/)
+    if (timeMatch) {
+      timestamp = timeMatch[1].trim()
+      text = text.slice(timeMatch[0].length).trim()
+    }
   }
 
   // Crash and critical error detection
   const isCrash = /(?:FATAL|EXCEPTION|UNHANDLED|SIGSEGV|SIGABRT|SYNTAXERROR|TYPEERROR|REFERENCEERROR|EADDRINUSE|MODULE_NOT_FOUND|EXITED WITH CODE|CRASH)/i.test(text)
   if (isCrash) {
     level = 'critical'
-  } else if (defaultLevel === 'error' || /\bERROR\b/i.test(text)) {
+  } else if (defaultLevel === 'error' || /\b(?:ERROR|ERR)\b/i.test(text)) {
     level = 'error'
   }
 

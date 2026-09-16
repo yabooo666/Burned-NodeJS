@@ -83,6 +83,11 @@
         </select>
 
         <label class="toggle-label">
+          <input type="checkbox" v-model="wordWrap" class="checkbox-input" />
+          <span>Wrap</span>
+        </label>
+
+        <label class="toggle-label">
           <input type="checkbox" v-model="autoScroll" class="checkbox-input" />
           <span>Auto-scroll</span>
         </label>
@@ -120,7 +125,7 @@
       >
         <!-- Optional Timestamp -->
         <span class="col-time font-mono" v-if="log.timestamp">{{ log.timestamp }}</span>
-        <span class="col-time font-mono text-muted" v-else>--:--:--</span>
+        <span class="col-time font-mono col-time-dimmed" v-else>-</span>
 
         <!-- App Source Tag -->
         <span class="col-source font-mono">[{{ log.source }}]</span>
@@ -130,7 +135,7 @@
         <span v-else-if="log.level === 'error'" class="badge-error font-mono">ERR</span>
 
         <!-- Log Text Content -->
-        <span class="col-text font-mono">{{ log.text }}</span>
+        <span class="col-text font-mono" :class="{ 'no-wrap': !wordWrap }">{{ cleanText(log.text) }}</span>
       </div>
     </div>
 
@@ -164,8 +169,18 @@ const maxLines = ref(100)
 const logs = ref<ProcessLogEntry[]>([])
 const loading = ref(false)
 const autoScroll = ref(true)
+const wordWrap = ref(true)
 const copied = ref(false)
 const terminalRef = ref<HTMLElement | null>(null)
+
+function cleanText(raw: string): string {
+  if (!raw) return ''
+  return raw
+    .replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
+    .replace(/\[(?:\d{1,3}(?:;\d{1,3})*)m/g, '')
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '')
+}
 
 
 
@@ -554,10 +569,15 @@ onUnmounted(() => {
 }
 
 .col-time {
-  color: var(--text-muted);
+  color: #666666;
   font-size: 0.725rem;
   flex-shrink: 0;
-  min-width: 75px;
+  width: 82px;
+  letter-spacing: -0.2px;
+}
+
+.col-time-dimmed {
+  color: #262626;
 }
 
 .col-source {
@@ -591,7 +611,15 @@ onUnmounted(() => {
 .col-text {
   color: var(--text-primary);
   white-space: pre-wrap;
-  word-break: break-all;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+
+.col-text.no-wrap {
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
 }
 
 .row-critical {
