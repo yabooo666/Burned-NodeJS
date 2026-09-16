@@ -10,10 +10,7 @@
           <SvgIcon name="refresh" size="14" :class="{ spinning: loading }" />
           <span>Refresh</span>
         </button>
-        <button class="btn btn-outline" @click="handleAction('restartAll')" :disabled="loading">
-          <SvgIcon name="reload" size="14" />
-          <span>Restart All</span>
-        </button>
+
       </div>
     </div>
 
@@ -60,30 +57,6 @@
                 >
                   <SvgIcon name="terminal" size="13" />
                 </button>
-                <button
-                  class="btn-icon"
-                  title="Restart Process"
-                  @click="handleAction('restart', proc.pm_id, proc.name)"
-                  :disabled="actionInProgress === proc.pm_id"
-                >
-                  <SvgIcon name="restart" size="13" />
-                </button>
-                <button
-                  class="btn-icon"
-                  title="Stop Process"
-                  @click="handleAction('stop', proc.pm_id, proc.name)"
-                  :disabled="actionInProgress === proc.pm_id || proc.status !== 'online'"
-                >
-                  <SvgIcon name="stop" size="13" />
-                </button>
-                <button
-                  class="btn-icon"
-                  title="Reload Process (Zero Downtime)"
-                  @click="handleAction('reload', proc.pm_id, proc.name)"
-                  :disabled="actionInProgress === proc.pm_id"
-                >
-                  <SvgIcon name="reload" size="13" />
-                </button>
               </div>
             </td>
           </tr>
@@ -101,95 +74,22 @@
       <code class="empty-hint">pm2 start your-app.js</code>
     </div>
 
-    <!-- Action Confirmation Modal -->
-    <ConfirmModal
-      :isOpen="modalConfig.isOpen"
-      :title="modalConfig.title"
-      :message="modalConfig.message"
-      :warning="modalConfig.warning"
-      :confirmText="modalConfig.confirmText"
-      @confirm="onModalConfirm"
-      @cancel="modalConfig.isOpen = false"
-    />
+
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
 import SvgIcon from '../components/SvgIcon.vue'
-import ConfirmModal from '../components/ConfirmModal.vue'
 
 defineProps<{
   pm2List: any[]
   loading?: boolean
 }>()
 
-const emit = defineEmits<{
+defineEmits<{
   (e: 'refresh'): void
-  (e: 'action', action: string, id?: number | string): void
   (e: 'view-logs', appName: string): void
 }>()
-
-const actionInProgress = ref<number | string | null>(null)
-
-const modalConfig = ref<{
-  isOpen: boolean
-  action: string
-  id?: number | string
-  title: string
-  message: string
-  warning?: string
-  confirmText?: string
-}>({
-  isOpen: false,
-  action: '',
-  title: '',
-  message: ''
-})
-
-function handleAction(action: string, id?: number | string, name?: string) {
-  if (action === 'restartAll') {
-    modalConfig.value = {
-      isOpen: true,
-      action: 'restartAll',
-      title: 'Restart All PM2 Services',
-      message: 'Are you sure you want to restart all active processes on this instance?',
-      warning: 'All connected clients and active tasks will be temporarily interrupted.',
-      confirmText: 'Restart All'
-    }
-    return
-  }
-
-  if (action === 'stop') {
-    modalConfig.value = {
-      isOpen: true,
-      action: 'stop',
-      id,
-      title: `Stop Service: ${name || '#' + id}`,
-      message: `Are you sure you want to stop process #${id} (${name || 'service'})?`,
-      warning: 'The service will be shut down and remain offline until manually restarted.',
-      confirmText: 'Stop Service'
-    }
-    return
-  }
-
-  // Execute directly for restart/reload
-  triggerAction(action, id)
-}
-
-function onModalConfirm() {
-  const { action, id } = modalConfig.value
-  modalConfig.value.isOpen = false
-  triggerAction(action, id)
-}
-
-function triggerAction(action: string, id?: number | string) {
-  actionInProgress.value = id ?? 'all'
-  emit('action', action, id)
-  setTimeout(() => {
-    actionInProgress.value = null
-  }, 1500)
-}
 </script>
 
 <style scoped>

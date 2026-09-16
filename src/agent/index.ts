@@ -1,5 +1,5 @@
 import http from 'node:http'
-import { getSystemMetrics, getPm2List, executePm2Command, getProcessLogs } from './system.js'
+import { getSystemMetrics, getPm2List, getProcessLogs } from './system.js'
 import { EMBEDDED_HTML } from './embedded-ui.js'
 import {
   initDb,
@@ -14,6 +14,9 @@ import {
 
 const PORT = parseInt(process.env.PORT || '27109', 10)
 const HOST = process.env.HOST || '0.0.0.0'
+
+// In-memory rate limiter (resets on service restart)
+const rateLimiter = new Map<string, { count: number; lockedUntil: number }>()
 
 // Initialize SQLite database & first-run checks
 initDb()
@@ -43,20 +46,37 @@ function isAuthenticated(req: http.IncomingMessage): boolean {
   return validateSession(token)
 }
 
+function addSecurityHeaders(res: http.ServerResponse) {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src data:; connect-src 'self'; frame-ancestors 'none'")
+}
+
 function sendJson(res: http.ServerResponse, status: number, data: any) {
+  addSecurityHeaders(res)
   res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-burned-token'
+    'Content-Type': 'application/json'
   })
   res.end(JSON.stringify(data))
 }
 
+const MAX_BODY_SIZE = 5 * 1024 * 1024 // 5MB
+
 function readJsonBody(req: http.IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
     let body = ''
-    req.on('data', chunk => { body += chunk })
+    let size = 0
+    req.on('data', (chunk: Buffer | string) => {
+      size += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
+      if (size > MAX_BODY_SIZE) {
+        req.destroy()
+        reject(new Error('Request body too large'))
+        return
+      }
+      body += chunk
+    })
     req.on('end', () => {
       try {
         resolve(body ? JSON.parse(body) : {})
@@ -72,16 +92,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
   const pathname = url.pathname
 
-  // Handle CORS preflight
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-burned-token'
-    })
-    res.end()
-    return
-  }
+
 
   // Healthcheck endpoint (open)
   if (pathname === '/health' || pathname === '/api/health') {
@@ -126,12 +137,35 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // Login with Password (open)
+  // Login with Password (rate-limited: 3 failures = 24h lockout, resets on restart)
   if (req.method === 'POST' && pathname === '/api/auth/login') {
+    const clientIp = req.socket.remoteAddress || 'unknown'
+    const rl = rateLimiter.get(clientIp)
+    if (rl && rl.lockedUntil > Date.now()) {
+      const hoursLeft = Math.ceil((rl.lockedUntil - Date.now()) / (1000 * 60 * 60))
+      sendJson(res, 429, { success: false, error: `Too many failed attempts. Locked for ${hoursLeft}h. Restart the service to reset.` })
+      return
+    }
     try {
       const { password } = await readJsonBody(req)
       const result = authenticateAdmin(password)
-      sendJson(res, result.success ? 200 : 401, result)
+      if (result.success) {
+        rateLimiter.delete(clientIp)
+        sendJson(res, 200, result)
+      } else {
+        const entry = rateLimiter.get(clientIp) || { count: 0, lockedUntil: 0 }
+        entry.count++
+        if (entry.count >= 3) {
+          entry.lockedUntil = Date.now() + (24 * 60 * 60 * 1000)
+        }
+        rateLimiter.set(clientIp, entry)
+        const remaining = 3 - entry.count
+        if (remaining > 0) {
+          sendJson(res, 401, { success: false, error: `Invalid password. ${remaining} attempt(s) remaining before 24h lockout.` })
+        } else {
+          sendJson(res, 429, { success: false, error: 'Too many failed attempts. Locked for 24h. Restart the service to reset.' })
+        }
+      }
     } catch (err: any) {
       sendJson(res, 400, { success: false, error: err.message })
     }
@@ -176,29 +210,19 @@ const server = http.createServer(async (req, res) => {
       return
     }
 
-    // API: PM2 Actions (restart, stop, reload)
-    if (req.method === 'POST' && pathname === '/api/pm2/action') {
-      try {
-        const { action, id } = await readJsonBody(req)
-        if (!action) {
-          sendJson(res, 400, { success: false, error: 'Missing action parameter' })
-          return
-        }
-        const result = await executePm2Command(action, id)
-        sendJson(res, result.success ? 200 : 500, result)
-      } catch (err: any) {
-        sendJson(res, 400, { success: false, error: err.message })
-      }
-      return
-    }
 
-    // API: SSE Real-Time Stream (requires token in query param or header)
+
+    // API: SSE Real-Time Stream (max 50 concurrent connections)
     if (req.method === 'GET' && pathname === '/api/events') {
+      if (sseClients.size >= 50) {
+        sendJson(res, 503, { error: 'Maximum concurrent connections reached' })
+        return
+      }
+      addSecurityHeaders(res)
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*'
+        'Connection': 'keep-alive'
       })
       res.write(': connected\n\n')
 
@@ -215,6 +239,7 @@ const server = http.createServer(async (req, res) => {
 
   // Web UI: Serve Embedded Single-Page App for any non-API route
   if (req.method === 'GET') {
+    addSecurityHeaders(res)
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-cache'

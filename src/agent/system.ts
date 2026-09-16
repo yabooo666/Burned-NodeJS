@@ -248,22 +248,4 @@ export async function getPm2List(): Promise<Pm2ProcessInfo[]> {
   }
 }
 
-export async function executePm2Command(action: string, id?: number | string): Promise<{ success: boolean; error?: string }> {
-  try {
-    let cmd = ''
-    if (action === 'restartAll') {
-      cmd = 'pm2 restart all'
-    } else if (action === 'reloadAll') {
-      cmd = 'pm2 reload all'
-    } else if (['restart', 'stop', 'reload', 'delete'].includes(action) && id !== undefined) {
-      cmd = `pm2 ${action} ${id}`
-    } else {
-      return { success: false, error: 'Invalid PM2 action' }
-    }
 
-    await execAsync(cmd)
-    return { success: true }
-  } catch (err: any) {
-    return { success: false, error: err.message || 'PM2 command execution failed' }
-  }
-}
