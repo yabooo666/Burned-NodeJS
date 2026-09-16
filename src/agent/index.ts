@@ -1,4 +1,6 @@
 import http from 'node:http'
+import fs from 'node:fs'
+import path from 'node:path'
 import { getSystemMetrics, getPm2List, getProcessLogs } from './system.js'
 import { EMBEDDED_HTML } from './embedded-ui.js'
 import {
@@ -12,8 +14,31 @@ import {
   closeDb
 } from './db.js'
 
+// Automatically load .env file if present
+try {
+  const envPath = path.resolve(process.cwd(), '.env')
+  if (fs.existsSync(envPath)) {
+    const envContent = fs.readFileSync(envPath, 'utf-8')
+    for (const line of envContent.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) continue
+      const eqIdx = trimmed.indexOf('=')
+      if (eqIdx > 0) {
+        const key = trimmed.slice(0, eqIdx).trim()
+        let val = trimmed.slice(eqIdx + 1).trim()
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1)
+        }
+        if (process.env[key] === undefined) {
+          process.env[key] = val
+        }
+      }
+    }
+  }
+} catch {}
+
 const PORT = parseInt(process.env.PORT || '27109', 10)
-const HOST = process.env.HOST || '0.0.0.0'
+const HOST = process.env.HOST || '127.0.0.1'
 
 // In-memory rate limiter (resets on service restart)
 const rateLimiter = new Map<string, { count: number; lockedUntil: number }>()
@@ -37,7 +62,7 @@ function getSessionToken(req: http.IncomingMessage): string {
     const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`)
     const queryToken = url.searchParams.get('token')
     if (queryToken) return queryToken.trim()
-  } catch {}
+  } catch { }
   return ''
 }
 
@@ -268,7 +293,7 @@ setInterval(async () => {
 
 // Start Server
 server.listen(PORT, HOST, () => {
-  console.log(`[Burned-Agent] Listening on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)
+  console.log(`[Burned-Agent] Listening on http://${HOST}:${PORT}`)
   console.log(`[Burned-Agent] PID: ${process.pid} | Platform: ${process.platform} (${process.arch})`)
 })
 
@@ -276,7 +301,7 @@ server.listen(PORT, HOST, () => {
 function handleShutdown(signal: string) {
   console.log(`\n[Burned-Agent] Received ${signal}. Closing gracefully...`)
   for (const client of sseClients) {
-    try { client.end() } catch {}
+    try { client.end() } catch { }
   }
   server.close(() => {
     closeDb()

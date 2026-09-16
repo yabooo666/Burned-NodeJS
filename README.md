@@ -35,12 +35,25 @@
 ### 1. Download & Run with PM2
 
 ```bash
-# Start with PM2
+# Start with PM2 (binds to 127.0.0.1 by default for security)
 pm2 start burned-agent.js --name burned-agent
+
+# Or bind to 0.0.0.0 to access directly via public IP:
+HOST=0.0.0.0 pm2 start burned-agent.js --name burned-agent
 
 # View the generated temporary setup key:
 pm2 logs burned-agent
 ```
+
+You can also create a `.env` file in the same directory:
+```env
+PORT=27109
+HOST=0.0.0.0
+```
+> **Tip:** When updating `.env` or environment variables for an existing PM2 process, restart with `--update-env`:
+> ```bash
+> pm2 restart burned-agent --update-env
+> ```
 
 On first startup, the console displays an ASCII setup box:
 ```
@@ -55,7 +68,7 @@ On first startup, the console displays an ASCII setup box:
 ```
 
 ### 2. Complete Setup in Web Browser
-1. Visit `http://YOUR_SERVER_IP:27109`.
+1. Visit `http://YOUR_SERVER_IP:27109` (or `http://localhost:27109`).
 2. Paste the 48-character key from the terminal.
 3. Set and confirm your new admin password.
 4. The temporary key is immediately destroyed, your password is encrypted with `scrypt`, and your dashboard unlocks.
@@ -88,10 +101,12 @@ dist/burned-agent.js   <-- The standalone agent to drop onto any server
 
 ## Configuration Options
 
+Environment variables can be provided via shell, PM2 (`ecosystem.config.cjs`), or a `.env` file in the working directory:
+
 | Environment Variable | Default | Description |
 | :--- | :--- | :--- |
 | `PORT` | `27109` | Port the web dashboard and API listen on |
-| `HOST` | `0.0.0.0` | Bind address (`0.0.0.0` for all interfaces, `127.0.0.1` for local) |
+| `HOST` | `127.0.0.1` | Bind address (`127.0.0.1` for local/reverse proxy, `0.0.0.0` for all interfaces) |
 | `BURNED_DB_PATH` | `./burned.db` | Custom path for SQLite database |
 
 ---

@@ -46,11 +46,11 @@ module.exports = {
 
         /**
          * HOST: Network interface to bind to.
+         * - '127.0.0.1' : Localhost only (default, best for local/proxy access).
          * - '0.0.0.0'   : Accessible from anywhere (public IP / LAN).
-         * - '127.0.0.1' : Localhost only (best when using Nginx/Caddy reverse proxy).
-         * Default: '0.0.0.0'
+         * Default: '127.0.0.1'
          */
-        HOST: '0.0.0.0',
+        HOST: '127.0.0.1',
 
         /**
          * BURNED_DB_PATH: Path to the SQLite database storing credentials & sessions.
